@@ -62,7 +62,7 @@
             <option :value="20">20</option>
             <option :value="50">50</option>
             <option :value="100">100</option>
-            <option :value="1000">全部</option>
+            <option :value="200">200</option>
           </select>
         </div>
         <div class="flex space-x-2 items-center">
@@ -326,11 +326,12 @@ const newAccount = ref({
 const batchAccounts = ref('')
 
 // 分页相关
-const allTokens = ref([])
+const displayedTokens = ref([])
 const currentPage = ref(1)
 const pageSize = ref(10)
-const totalItems = computed(() => allTokens.value.length)
+const totalItems = ref(0)
 const totalPages = computed(() => Math.max(1, Math.ceil(totalItems.value / pageSize.value)))
+const isLoading = ref(false)
 
 // 多选相关
 const selectedTokens = ref([])
@@ -403,7 +404,14 @@ const deleteSelected = async () => {
 
 const deleteAllAccounts = async () => {
   try {
-    const deletePromises = allTokens.value.map(token => 
+    // 先获取全部账号数据
+    const res = await axios.get('/api/getAllAccounts', {
+      params: { page: 1, pageSize: 10000 },
+      headers: { 'Authorization': localStorage.getItem('apiKey') || '' }
+    })
+    const allAccounts = res.data.data
+
+    const deletePromises = allAccounts.map(token =>
       axios.delete('/api/deleteAccount', {
         data: { email: token.email },
         headers: {
@@ -411,9 +419,10 @@ const deleteAllAccounts = async () => {
         }
       })
     )
-    
+
     await Promise.all(deletePromises)
     showDeleteAllConfirm.value = false
+    currentPage.value = 1
     await getTokens()
     selectedTokens.value = []
     selectAll.value = false
@@ -424,27 +433,22 @@ const deleteAllAccounts = async () => {
   }
 }
 
-// 当前页显示的tokens
-const displayedTokens = computed(() => {
-  const start = (currentPage.value - 1) * pageSize.value
-  const end = start + pageSize.value
-  return allTokens.value.slice(start, end)
-})
-
-const changePage = (page) => {
+const changePage = async (page) => {
   if (page >= 1 && page <= totalPages.value) {
     currentPage.value = page
     // 重置选择状态
     selectedTokens.value = []
     selectAll.value = false
+    await getTokens()
   }
 }
 
-const changePageSize = () => {
+const changePageSize = async () => {
   currentPage.value = 1
   // 重置选择状态
   selectedTokens.value = []
   selectAll.value = false
+  await getTokens()
 }
 
 const showToast = (message, type = 'success') => {
@@ -468,23 +472,26 @@ const copyToClipboard = async (text) => {
 }
 
 const getTokens = async () => {
+  isLoading.value = true
   try {
-    // 始终获取完整的账号列表以确保数据同步
-    const fullRes = await axios.get('/api/getAllAccounts', {
+    const res = await axios.get('/api/getAllAccounts', {
       params: {
-        page: 1,
-        pageSize: 1000
+        page: currentPage.value,
+        pageSize: pageSize.value
       },
       headers: {
         'Authorization': localStorage.getItem('apiKey') || ''
       }
     })
 
-    allTokens.value = fullRes.data.data
+    displayedTokens.value = res.data.data
+    totalItems.value = res.data.total
 
-    // 如果当前页超出了总页数，重置到第一页
+    // 如果当前页超出了总页数，重置到第一页并重新获取
     if (currentPage.value > totalPages.value && totalPages.value > 0) {
       currentPage.value = 1
+      await getTokens()
+      return
     }
 
     // 重置选择状态
@@ -494,6 +501,8 @@ const getTokens = async () => {
   } catch (error) {
     console.error('获取Token列表失败:', error)
     showToast('获取Token列表失败: ' + error.message, 'error')
+  } finally {
+    isLoading.value = false
   }
 }
 
@@ -628,33 +637,45 @@ const deleteToken = async (email) => {
   }
 }
 
-const exportAccounts = () => {
-  if (allTokens.value.length === 0) {
-    showToast('没有可导出的账号', 'error')
-    return
+const exportAccounts = async () => {
+  try {
+    // 获取全部账号用于导出
+    const res = await axios.get('/api/getAllAccounts', {
+      params: { page: 1, pageSize: 10000 },
+      headers: { 'Authorization': localStorage.getItem('apiKey') || '' }
+    })
+    const allAccounts = res.data.data
+
+    if (allAccounts.length === 0) {
+      showToast('没有可导出的账号', 'error')
+      return
+    }
+
+    // 构建导出内容，格式为"账号:密码"，每行一个
+    const content = allAccounts.map(token => `${token.email}:${token.password}`).join('\n')
+
+    // 创建Blob对象
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' })
+
+    // 创建下载链接并触发下载
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = 'qwen_accounts.txt'
+    document.body.appendChild(link)
+    link.click()
+
+    // 清理
+    setTimeout(() => {
+      document.body.removeChild(link)
+      URL.revokeObjectURL(url)
+    }, 100)
+
+    showToast('导出完成')
+  } catch (error) {
+    console.error('导出失败:', error)
+    showToast('导出失败: ' + error.message, 'error')
   }
-  
-  // 构建导出内容，格式为"账号:密码"，每行一个
-  const content = allTokens.value.map(token => `${token.email}:${token.password}`).join('\n')
-  
-  // 创建Blob对象
-  const blob = new Blob([content], { type: 'text/plain;charset=utf-8' })
-  
-  // 创建下载链接并触发下载
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = 'qwen_accounts.txt'
-  document.body.appendChild(link)
-  link.click()
-  
-  // 清理
-  setTimeout(() => {
-    document.body.removeChild(link)
-    URL.revokeObjectURL(url)
-  }, 100)
-  
-  showToast('导出完成')
 }
 
 onMounted(() => {
